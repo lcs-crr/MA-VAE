@@ -9,9 +9,8 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 import random
-from tensorflow.keras.layers import Input, Dense, GaussianNoise, RepeatVector, Bidirectional, LSTM, \
-    TimeDistributed, Concatenate, MultiHeadAttention
-import os
+from tensorflow.keras.layers import Input, Dense, GaussianNoise, Bidirectional, LSTM, \
+    TimeDistributed, MultiHeadAttention
 
 seed = 1
 np.random.seed(seed)

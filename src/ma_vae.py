@@ -62,7 +62,6 @@ class MA_VAE(tf.keras.Model):
         self.total_loss_tracker = tf.keras.metrics.Mean(name="loss")
         self.log_probs_loss_tracker = tf.keras.metrics.Mean(name="log_probs_loss")
         self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
-        self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="rec_loss")
 
         # Modifiable weight for KL-loss
         self.beta = tf.Variable(beta, trainable=False)  # Weight for KL-Loss, can be modified with a callback
@@ -76,8 +75,7 @@ class MA_VAE(tf.keras.Model):
         # Reduce KL divergence to single value
         kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
         # Calculate mean-squared error between encoder input and sampled decoder output, not used
-        recon_loss = tf.keras.losses.MeanSquaredError()(X, Xhat)
-        return -log_probs_loss, kl_loss, recon_loss
+        return -log_probs_loss, kl_loss
 
     @tf.function
     def evaluate_log_prob(self, sample, loc, scale):
@@ -99,7 +97,7 @@ class MA_VAE(tf.keras.Model):
             # Forward pass through decoder
             Xhat_mean, Xhat_log_var, Xhat = self.decoder(A, training=True)
             # Calculate losses from parameters
-            log_probs_loss, kl_loss, recon_loss = self.stoch_vae_loss_fn(
+            log_probs_loss, kl_loss = self.stoch_vae_loss_fn(
                 X,
                 Xhat,
                 Xhat_mean,
@@ -117,12 +115,10 @@ class MA_VAE(tf.keras.Model):
         self.total_loss_tracker.update_state(total_loss)
         self.log_probs_loss_tracker.update_state(log_probs_loss)
         self.kl_loss_tracker.update_state(kl_loss)
-        self.reconstruction_loss_tracker.update_state(recon_loss)
         return {
             "loss": self.total_loss_tracker.result(),
             "log_probs_loss": self.log_probs_loss_tracker.result(),
             "kl_loss": self.kl_loss_tracker.result(),
-            "rec_loss": self.reconstruction_loss_tracker.result(),
         }
 
     @tf.function
@@ -132,7 +128,7 @@ class MA_VAE(tf.keras.Model):
         # # Forward pass
         Xhat_mean, Xhat_log_var, Xhat, z_mean, z_log_var, z, A = self(X, training=False)
         # Calculate losses from parameters
-        log_probs_loss, kl_loss, recon_loss = self.stoch_vae_loss_fn(
+        log_probs_loss, kl_loss = self.stoch_vae_loss_fn(
             X,
             Xhat,
             Xhat_mean,
@@ -144,7 +140,6 @@ class MA_VAE(tf.keras.Model):
         self.total_loss_tracker.update_state(total_loss)
         self.log_probs_loss_tracker.update_state(log_probs_loss)
         self.kl_loss_tracker.update_state(kl_loss)
-        self.reconstruction_loss_tracker.update_state(recon_loss)
         return {m.name: m.result() for m in self.metrics}
 
     @property
@@ -153,7 +148,6 @@ class MA_VAE(tf.keras.Model):
             self.total_loss_tracker,
             self.log_probs_loss_tracker,
             self.kl_loss_tracker,
-            self.reconstruction_loss_tracker,
         ]
 
     @tf.function

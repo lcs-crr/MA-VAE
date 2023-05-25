@@ -255,40 +255,17 @@ for i, train_list in enumerate(train_list_list):
     tf.data.experimental.save(tf_val, 'SAVE_PATH')
 
     ## Process test data
-    window_shift = 1
     # Standardise normal test data, i.e. transform it such that mean=0 and std_dev=1
-    scaled_list = list(standardise(test_list, stat_metrics))
-    # Pre-allocate list where each item represents the windowed time series
-    scaled_windowed_list = []
-    # For time series in test list
-    for time_series in scaled_list:
-        # Window training and validation data with given window size and shift
-        windowed_time_series_temp = window_list(list(time_series), window_size, window_shift)
-        # -> 3D array of shape (number of windows, window size, features)
-        scaled_windowed_list.append(windowed_time_series_temp)
-        # -> List of 3D arrays, each shape (number of windows, window size, features)
-    # Concatenate all list items into one array
-    scaled_normal_test_window = np.vstack(scaled_windowed_list)
-    # -> 3D array of shape (number of windows, window size, features)
+    scaled_normal_test_list = list(standardise(test_list, stat_metrics))
+    # -> List multivariate time-series of varying length
 
     # Standardise anomalous test data, i.e. transform it such that mean=0 and std_dev=1
-    scaled_list = list(standardise(anomalous_data, stat_metrics))
-    # Pre-allocate list where each item represents the windowed time series
-    scaled_windowed_list = []
-    # For time series in test list
-    for time_series in scaled_list:
-        # Window training and validation data with given window size and shift
-        windowed_time_series_temp = window_list(list(time_series), window_size, window_shift)
-        # -> 3D array of shape (number of windows, window size, features)
-        scaled_windowed_list.append(windowed_time_series_temp)
-        # -> List of 3D arrays, each shape (number of windows, window size, features)
-    # Concatenate all list items into one array
-    scaled_anomalous_test_window = np.vstack(scaled_windowed_list)
-    # -> 3D array of shape (number of windows, window size, features)
+    scaled_anomalous_test_list = list(standardise(anomalous_data, stat_metrics))
+    # -> List multivariate time-series of varying length
 
     # Save normal and anomalous test data as pickle files
     with open(os.path.join('SAVE_PATH', versions[i], 'FILE_NAME', 'wb')) as f:
-        pickle.dump(scaled_normal_test_window, f)
+        pickle.dump(scaled_normal_test_list, f)
 
     with open(os.path.join('SAVE_PATH', versions[i], 'FILE_NAME', 'wb')) as f:
-        pickle.dump(scaled_anomalous_test_window, f)
+        pickle.dump(scaled_anomalous_test_list, f)

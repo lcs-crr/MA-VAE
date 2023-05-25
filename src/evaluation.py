@@ -2,7 +2,7 @@
 # Mercedes-Benz AG, Stuttgart, Germany
 
 """
-This is the script used to evaluate the models discussed.
+This is the script used to evaluate the model discussed.
 """
 
 import numpy as np
@@ -17,107 +17,173 @@ np.random.seed(seed)
 tf.random.set_seed(seed)
 random.seed(seed)
 
-tf_val = tf.data.experimental.load(r'LOAD_PATH')
+# Load validation data
+with open('LOAD_PATH', 'rb') as f:
+    validation_data = pickle.load(f)
+    # -> List multivariate time-series of varying length
 
 # Load normal test data
 with open('LOAD_PATH', 'rb') as f:
     normal_test_data = pickle.load(f)
-    # -> 3D array of shape (2606, window size, features)
+    # -> List multivariate time-series of varying length
 
 # Load anomalous test data
 with open('LOAD_PATH', 'rb') as f:
     anomalous_test_data = pickle.load(f)
-    # -> 3D array of shape (225, window size, features)
+    # -> List multivariate time-series of varying length
 
 
-def evaluate_vmsa_vae(model, data, samples):
-    # If data is tf-data (validation data) convert to numpy array
-    if type(data) is not np.ndarray:
-        test_data_list = []
-        for batch in data:
-            test_data_list.append(batch[0].numpy())
-        test_data = np.vstack(test_data_list)
+def window(data, window_size, shift):
+    # Find number of resulting windows given the window size and shift
+    set_window_count = (data.shape[0] - window_size) // shift + 1
+    # Pre-allocate output array
+    window_data = np.zeros((set_window_count, window_size, data.shape[1]))
+    # For number of resulting windows
+    for j in range(set_window_count):
+        window_data[j] = data[j * shift:window_size + j * shift]
+    return window_data
 
-    sample_error_list = []
-    # Run model L times and average
-    for L in range(samples):
-        # Inference
-        output = model.predict(test_data, verbose=0)
-        # Extract mean and log variance from output
-        mean = output[0]
-        log_var = output[1]
-        # Transform log variance to standard deviation
-        std_dev = tf.math.exp(0.5 * log_var)
-        # Create distribution with parameters
-        output_dist = tfp.distributions.Normal(loc=mean, scale=std_dev)
-        # Calculate negative log likelihood
-        log_lik = tf.reduce_mean(-output_dist.unnormalized_log_prob(test_data), axis=-1)
-        sample_error_list.append(np.expand_dims(log_lik, axis=0))
-    sample_error_array = np.vstack(sample_error_list)
-    return tf.reduce_mean(sample_error_array, axis=0)
+
+def rev_window(windows, shift, mode):
+    if mode == 'last':  # Whole first window, then all last time steps of following windows
+        data = np.zeros(((windows.shape[0] - 1) * shift + windows.shape[1], windows.shape[2]))  # Pre-allocate array
+        data[:windows.shape[1], :] = windows[0, :, :]  # First whole window, then all last time steps of windows
+        for i in range(windows.shape[0] - 1):
+            data[windows.shape[1] + shift * i: shift * (i + 1) + windows.shape[1], :] = windows[(i + 1), -1 * shift:, :]
+    elif mode == 'first':
+        data = np.zeros(((windows.shape[0] - 1) * shift + windows.shape[1], windows.shape[2]))  # Pre-allocate array
+        data[-windows.shape[1]:, :] = windows[-1, :, :]  # Last window
+        for i in range(windows.shape[0] - 1):  # All first time steps of windows, then whole last window
+            data[shift * i: shift * (i + 1), :] = windows[i, :shift, :]
+    elif mode == 'mean':
+        data = np.zeros((windows.shape[0], (windows.shape[0] - 1) * shift + windows.shape[1],
+                         windows.shape[2])) + np.nan  # Pre-allocate array
+        for i in range(windows.shape[0]):
+            data[i, i:i + windows.shape[1], :] = windows[i]
+        data = np.nanmean(data, axis=0)
+    return data
+
+
+def evaluate_vmsa_vae(model, data, rev_mode, window_size):
+    # Window data
+    shift = 1
+    test_data = window(data, window_size, shift)
+    # Inference
+    reconstruction = model.predict(data,
+                                   batch_size=1024,
+                                   verbose=0,
+                                   steps=None,
+                                   callbacks=None)
+
+    # Extract mean and log variance from output
+    mean = reconstruction[0]
+    log_var = reconstruction[1]
+    # Convert log variance to variance
+    var = tf.math.exp(log_var)
+    # Reverse-window
+    mean = rev_window(mean, 1, rev_mode)
+    var = rev_window(var, 1, rev_mode)
+    # Convert variance to standard deviation
+    std = tf.sqrt(var)
+    # Create distribution with parameters
+    output_dist = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=std)
+    # Calculate negative log likelihood
+    log_probs = tf.expand_dims(-output_dist.unnormalized_log_prob(test_data), axis=1).numpy()
+    return log_probs, [mean, std]
 
 
 # Load model
 model = tf.keras.models.load_model('LOAD_PATH')
-# Inference on validation data
-score_normal_val = evaluate_vmsa_vae(model, tf_val, 5)
-# Specify window percentile
-window_percentile = 85
-# Reduce windows to scalars through percentile
-score_normal_val = np.percentile(score_normal_val, window_percentile, axis=-1)
-# Set threshold
-threshold = np.percentile(score_normal_val, 99)
 
-# Create label vectors
-true_labels_normal = np.zeros(len(normal_test_data))
-# -> 1D array of shape (2606,)
-true_labels_anomaly = np.zeros(len(anomalous_test_data))
-# -> 1D array of shape (225,)
+rev_mode = 'mean'
+window_size = 256
 
-# Concatenate label vectors
+val_score = []
+for sequence in validation_data:
+    # Inference on validation data
+    score, recon = evaluate_vmsa_vae(model, sequence, rev_mode, window_size)
+    # Reduce windows to scalars through percentile
+    val_score.append(np.percentile(score, 100))
+val_score = np.vstack(val_score)
+# Set unsupervised threshold
+threshold = np.percentile(val_score, 100)
+
+# Evaluate normal test data to obtain TN and FP
+FP = 0
+TN = 0
+normal_test_score = []
+for sequence in normal_test_data:
+    # Inference on sequence
+    score, recon = evaluate_vmsa_vae(model, sequence, rev_mode, window_size)
+    score = np.percentile(score, 100)
+    # Find maximum error in anomaly score sequence
+    normal_test_score.append(score)
+# Obtain predicted labels
+predicted_labels_normal = normal_test_score >= threshold
+
+
+# Evaluate anomalous test data to obtain TP and FN
+TP = 0
+FN = 0
+anomalous_test_score = []
+for sequence in anomalous_test_data:
+    # Inference on sequence
+    score, recon = evaluate_vmsa_vae(model, sequence, rev_mode, window_size)
+    # Find maximum error in anomaly score sequence
+    score = np.percentile(score, 100)
+    anomalous_test_score.append(score)
+# Obtain predicted labels
+predicted_labels_anomaly = anomalous_test_score >= threshold
+
+# Concatenate predicted label vectors
+predicted_labels_all = np.concatenate((predicted_labels_normal, predicted_labels_anomaly), axis=0)
+# Create true label vectors
+true_labels_normal = np.zeros_like(predicted_labels_normal)
+true_labels_anomaly = np.ones_like(predicted_labels_anomaly)
 true_labels_all = np.concatenate((true_labels_normal, true_labels_anomaly), axis=0)
 
-# Inference on test data
-score_normal = evaluate_vmsa_vae(model, normal_test_data, 5)
-# -> 3D array of shape (2606, window size, 1)
-score_anomaly = evaluate_vmsa_vae(model, anomalous_test_data, 5)
-# -> 3D array of shape (225, window size, 1)
-
-# Reduce windows to scalars through percentile
-score_normal = np.percentile(score_normal, window_percentile, axis=1)
-score_anomaly = np.percentile(score_anomaly, window_percentile, axis=1)
-
-# Obtain predicted label vectors
-predicted_labels_normal = score_normal >= threshold
-predicted_labels_anomaly = score_anomaly >= threshold
-
-# Concatenate label vectors
-predicted_labels_all = np.concatenate((predicted_labels_normal, predicted_labels_anomaly), axis=0)
-
-# Calculate precision, recall and F1 metrics
+# Calculate precision, recall and F1 metrics for unsupervised threshold
 precision = sklearn.metrics.precision_score(true_labels_all, predicted_labels_all)
 recall = sklearn.metrics.recall_score(true_labels_all, predicted_labels_all)
 f1 = sklearn.metrics.f1_score(true_labels_all, predicted_labels_all)
 
-# Find precision and recall values at different thresholds
 precision_list = []
 recall_list = []
-# Specify percentile range to run for loop over
+f1_list = []
 percentile_array = np.arange(0, 100.1, 0.1)
 for percentile in percentile_array:
-    # Obtain threshold
-    threshold_temp = np.percentile(np.concatenate((score_normal, score_anomaly)), percentile)
-    # Obtain predicted label vectors
-    predicted_labels_normal = score_normal >= threshold_temp
-    predicted_labels_anomaly = score_anomaly >= threshold_temp
-    # Concatenate label vectors
+    # Set temporary threshold
+    threshold_temp = np.percentile(np.concatenate((normal_test_score, anomalous_test_score)), percentile)
+    # Obtain temporary predicted labels
+    predicted_labels_normal = normal_test_score >= threshold_temp
+    predicted_labels_anomaly = anomalous_test_score >= threshold_temp
+    # Concatenate temporary predicted label vectors
     predicted_labels_all = np.concatenate((predicted_labels_normal, predicted_labels_anomaly), axis=0)
-    # Calculate precision and recall metrics
-    precision_temp = sklearn.metrics.precision_score(true_labels_all, predicted_labels_all)
-    recall_temp = sklearn.metrics.recall_score(true_labels_all, predicted_labels_all)
-    precision_list.append(precision_temp)
-    recall_list.append(recall_temp)
-precision_list = np.vstack(precision_list)
-recall_list = np.vstack(recall_list)
-# Calculate area under the precision recall curve
-a_prc = sklearn.metrics.auc(recall_list[:, 0], precision_list[:, 0])
+    # Calculate temporary precision, recall and F1 metrics
+    precision = sklearn.metrics.precision_score(true_labels_all, predicted_labels_all)
+    recall = sklearn.metrics.recall_score(true_labels_all, predicted_labels_all)
+    f1 = sklearn.metrics.f1_score(true_labels_all, predicted_labels_all)
+    precision_list.append(precision)
+    recall_list.append(recall)
+    f1_list.append(f1)
+precision_array = np.vstack(precision_list)
+recall_array = np.vstack(recall_list)
+f1_array = np.vstack(f1_list)
+# Calculate area under the precision-recall curve
+auc = sklearn.metrics.auc(recall_array[:, 0], precision_array[:, 0])
+# Set threshold at theoretical maximum F1 score
+threshold_best = np.percentile(np.concatenate((normal_test_score, anomalous_test_score)),
+                               percentile_array[np.argmax(f1_array)])
+
+
+# Re-evaluate normal test data with ideal threshold
+predicted_labels_normal = normal_test_score >= threshold_best
+
+
+# Re-evaluate anomalous test data with ideal threshold
+predicted_labels_anomaly = anomalous_test_score >= threshold_best
+# Concatenate predicted label vectors
+predicted_labels_all = np.concatenate((predicted_labels_normal, predicted_labels_anomaly), axis=0)
+
+# Calculate theoretical maximum F1 score
+f1_best = sklearn.metrics.f1_score(true_labels_all, predicted_labels_all)

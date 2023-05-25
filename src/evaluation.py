@@ -109,8 +109,6 @@ val_score = np.vstack(val_score)
 threshold = np.percentile(val_score, 100)
 
 # Evaluate normal test data to obtain TN and FP
-FP = 0
-TN = 0
 normal_test_score = []
 for sequence in normal_test_data:
     # Inference on sequence
@@ -123,8 +121,6 @@ predicted_labels_normal = normal_test_score >= threshold
 
 
 # Evaluate anomalous test data to obtain TP and FN
-TP = 0
-FN = 0
 anomalous_test_score = []
 for sequence in anomalous_test_data:
     # Inference on sequence

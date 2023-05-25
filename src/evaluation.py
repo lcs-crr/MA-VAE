@@ -119,7 +119,6 @@ for sequence in normal_test_data:
 # Obtain predicted labels
 predicted_labels_normal = normal_test_score >= threshold
 
-
 # Evaluate anomalous test data to obtain TP and FN
 anomalous_test_score = []
 for sequence in anomalous_test_data:

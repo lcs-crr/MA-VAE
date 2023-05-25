@@ -146,6 +146,7 @@ f1 = sklearn.metrics.f1_score(true_labels_all, predicted_labels_all)
 precision_list = []
 recall_list = []
 f1_list = []
+# Specify percentile range to run for loop over
 percentile_array = np.arange(0, 100.1, 0.1)
 for percentile in percentile_array:
     # Set temporary threshold
@@ -156,12 +157,12 @@ for percentile in percentile_array:
     # Concatenate temporary predicted label vectors
     predicted_labels_all = np.concatenate((predicted_labels_normal, predicted_labels_anomaly), axis=0)
     # Calculate temporary precision, recall and F1 metrics
-    precision = sklearn.metrics.precision_score(true_labels_all, predicted_labels_all)
-    recall = sklearn.metrics.recall_score(true_labels_all, predicted_labels_all)
-    f1 = sklearn.metrics.f1_score(true_labels_all, predicted_labels_all)
-    precision_list.append(precision)
-    recall_list.append(recall)
-    f1_list.append(f1)
+    precision_temp = sklearn.metrics.precision_score(true_labels_all, predicted_labels_all)
+    recall_temp = sklearn.metrics.recall_score(true_labels_all, predicted_labels_all)
+    f1_temp = sklearn.metrics.f1_score(true_labels_all, predicted_labels_all)
+    precision_list.append(precision_temp)
+    recall_list.append(recall_temp)
+    f1_list.append(f1_temp)
 precision_array = np.vstack(precision_list)
 recall_array = np.vstack(recall_list)
 f1_array = np.vstack(f1_list)
@@ -171,10 +172,8 @@ auc = sklearn.metrics.auc(recall_array[:, 0], precision_array[:, 0])
 threshold_best = np.percentile(np.concatenate((normal_test_score, anomalous_test_score)),
                                percentile_array[np.argmax(f1_array)])
 
-
 # Re-evaluate normal test data with ideal threshold
 predicted_labels_normal = normal_test_score >= threshold_best
-
 
 # Re-evaluate anomalous test data with ideal threshold
 predicted_labels_anomaly = anomalous_test_score >= threshold_best

@@ -67,14 +67,18 @@ class MA_VAE(tf.keras.Model):
         self.beta = tf.Variable(beta, trainable=False)  # Weight for KL-Loss, can be modified with a callback
 
     @tf.function
-    def stoch_vae_loss_fn(self, X, Xhat, Xhat_mean, Xhat_log_var, z_mean, z_log_var):
+    def loss_fn(self, X, Xhat, Xhat_mean, Xhat_log_var, z_mean, z_log_var):
         # Calculate log probability of data belonging to parametrised distribution
-        log_probs_loss = self.evaluate_log_prob(X, loc=Xhat_mean, scale=tf.math.exp(0.5 * Xhat_log_var))
+        log_probs_loss = self.evaluate_log_prob(X, loc=Xhat_mean, scale=tf.sqrt(tf.math.exp(Xhat_log_var)))
+        # Reduce log probability to single value
+        log_probs_loss = tf.reduce_sum(log_probs_loss, axis=1)
         # Calculate KL Divergence between latent distribution and Gaussian distribution
-        kl_loss = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
+        kl_loss = tfp.distributions.kl_divergence(
+            tfp.distributions.Normal(loc=0., scale=1.),
+            tfp.distributions.Normal(loc=z_mean, scale=tf.sqrt(tf.math.exp(z_log_var))))
         # Reduce KL divergence to single value
-        kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
-        # Calculate mean-squared error between encoder input and sampled decoder output, not used
+        kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1), axis=-1)
+        # Combine negative log probability with weighted KL divergence
         return -log_probs_loss, kl_loss
 
     @tf.function
@@ -125,8 +129,12 @@ class MA_VAE(tf.keras.Model):
     def test_step(self, X):
         if isinstance(X, tuple):
             X = X[0]
-        # # Forward pass
-        Xhat_mean, Xhat_log_var, Xhat, z_mean, z_log_var, z, A = self(X, training=False)
+        # Forward pass through encoder
+        z_mean, z_log_var, z, states = self.encoder(X, training=False)
+        # Forward pass through MA
+        A = self.ma([X, z_mean], training=False)
+        # Forward pass through decoder
+        Xhat_mean, Xhat_log_var, Xhat = self.decoder(A, training=False)
         # Calculate losses from parameters
         log_probs_loss, kl_loss = self.stoch_vae_loss_fn(
             X,
@@ -153,11 +161,11 @@ class MA_VAE(tf.keras.Model):
     @tf.function
     def call(self, inputs, **kwargs):
         # Encoder is fed with input window
-        z_mean, z_log_var, z, states = self.encoder(inputs, **kwargs)
+        z_mean, z_log_var, z, states = self.encoder(inputs, training=False)
         # Mean matrix of latent distribution is passed to MA mechanism
-        A = self.ma([inputs, z_mean], **kwargs)
+        A = self.ma([inputs, z_mean], training=False)
         # Decoder is fed with the attention matrix from MA mechanism
-        Xhat_mean, Xhat_log_var, Xhat = self.decoder(A, **kwargs)
+        Xhat_mean, Xhat_log_var, Xhat = self.decoder(A, training=False)
         return Xhat_mean, Xhat_log_var, Xhat, z_mean, z_log_var, z, A
 
 
@@ -186,7 +194,7 @@ class VAE_Encoder(tf.keras.Model):
         # Get epsilon for reparametrisation trick
         eps = output_dist.sample(tf.shape(z_mean))
         # Reparametrisation trick
-        z = z_mean + tf.math.exp(0.5 * z_log_var) * eps
+        z = z_mean + tf.sqrt(tf.math.exp(z_log_var)) * eps
         return tf.keras.Model(enc_input, [z_mean, z_log_var, z, bilstm], name="encoder")
 
     @tf.function
@@ -216,7 +224,7 @@ class VAE_Decoder(tf.keras.Model):
         # Get epsilon for reparametrisation trick
         eps = output_dist.sample(tf.shape(Xhat_mean))
         # Reparametrisation trick
-        Xhat = Xhat_mean + tf.math.exp(0.5 * Xhat_log_var) * eps
+        Xhat = Xhat_mean + tf.sqrt(tf.math.exp(Xhat_log_var)) * eps
         return tf.keras.Model(attention_input, [Xhat_mean, Xhat_log_var, Xhat], name="decoder")
 
     @tf.function

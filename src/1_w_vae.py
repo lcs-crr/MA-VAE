@@ -2,15 +2,15 @@
 # Mercedes-Benz AG, Stuttgart, Germany
 
 """
-This is the script used to train the MA-VAE model.
+This is the script used to train the W-VAE model.
+10.1504/IJDMB.2019.101395
 """
 
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 import random
-from tensorflow.keras.layers import Input, Dense, GaussianNoise, Bidirectional, LSTM, \
-    TimeDistributed, MultiHeadAttention
+import tf.keras.layers as tfkl
 
 seed = 1
 np.random.seed(seed)
@@ -49,14 +49,13 @@ class VAE_kl_annealing(tf.keras.callbacks.Callback):
         print(f"Beta value: {self.model.beta.numpy():.10f}, cycle epoch {int(shifted_epochs % self.annealing_epochs)}")
 
 
-class MA_VAE(tf.keras.Model):
-    def __init__(self, encoder, decoder, ma, beta=1e-8):
-        super(MA_VAE, self).__init__()
+class W_VAE(tf.keras.Model):
+    def __init__(self, encoder, decoder, beta=1e-8):
+        super(W_VAE, self).__init__()
 
         # Model
         self.encoder = encoder
         self.decoder = decoder
-        self.ma = ma
 
         # Metrics
         self.total_loss_tracker = tf.keras.metrics.Mean(name="loss")
@@ -70,15 +69,14 @@ class MA_VAE(tf.keras.Model):
     def loss_fn(self, X, Xhat, Xhat_mean, Xhat_log_var, z_mean, z_log_var):
         # Calculate log probability of data belonging to parametrised distribution
         log_probs_loss = self.evaluate_log_prob(X, loc=Xhat_mean, scale=tf.sqrt(tf.math.exp(Xhat_log_var)))
-        # Reduce log probability to single value
+        # Reduce log probability to single value per batch
         log_probs_loss = tf.reduce_sum(log_probs_loss, axis=1)
         # Calculate KL Divergence between latent distribution and Gaussian distribution
         kl_loss = tfp.distributions.kl_divergence(
             tfp.distributions.Normal(loc=0., scale=1.),
             tfp.distributions.Normal(loc=z_mean, scale=tf.sqrt(tf.math.exp(z_log_var))))
-        # Reduce KL divergence to single value
+        # Reduce KL divergence to single value per batch
         kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1), axis=-1)
-        # Combine negative log probability with weighted KL divergence
         return -log_probs_loss, kl_loss
 
     @tf.function
@@ -96,12 +94,10 @@ class MA_VAE(tf.keras.Model):
         with tf.GradientTape() as tape:
             # Forward pass through encoder
             z_mean, z_log_var, z, states = self.encoder(X, training=True)
-            # Forward pass through MA
-            A = self.ma([X, z], training=True)
             # Forward pass through decoder
-            Xhat_mean, Xhat_log_var, Xhat = self.decoder(A, training=True)
+            Xhat_mean, Xhat_log_var, Xhat = self.decoder(z, training=True)
             # Calculate losses from parameters
-            log_probs_loss, kl_loss = self.stoch_vae_loss_fn(
+            log_probs_loss, kl_loss = self.loss_fn(
                 X,
                 Xhat,
                 Xhat_mean,
@@ -130,13 +126,11 @@ class MA_VAE(tf.keras.Model):
         if isinstance(X, tuple):
             X = X[0]
         # Forward pass through encoder
-        z_mean, z_log_var, z, states = self.encoder(X, training=False)
-        # Forward pass through MA
-        A = self.ma([X, z_mean], training=False)
+        z_mean, z_log_var, z, _ = self.encoder(X, training=False)
         # Forward pass through decoder
-        Xhat_mean, Xhat_log_var, Xhat = self.decoder(A, training=False)
+        Xhat_mean, Xhat_log_var, Xhat = self.decoder(z, training=False)
         # Calculate losses from parameters
-        log_probs_loss, kl_loss = self.stoch_vae_loss_fn(
+        log_probs_loss, kl_loss = self.loss_fn(
             X,
             Xhat,
             Xhat_mean,
@@ -160,13 +154,9 @@ class MA_VAE(tf.keras.Model):
 
     @tf.function
     def call(self, inputs, **kwargs):
-        # Encoder is fed with input window
-        z_mean, z_log_var, z, states = self.encoder(inputs, training=False)
-        # Mean matrix of latent distribution is passed to MA mechanism
-        A = self.ma([inputs, z_mean], training=False)
-        # Decoder is fed with the attention matrix from MA mechanism
-        Xhat_mean, Xhat_log_var, Xhat = self.decoder(A, training=False)
-        return Xhat_mean, Xhat_log_var, Xhat, z_mean, z_log_var, z, A
+        z_mean, z_log_var, z, _ = self.encoder(inputs, **kwargs)
+        Xhat_mean, Xhat_log_var, Xhat = self.decoder(z, **kwargs)
+        return Xhat_mean, Xhat_log_var, Xhat, z_mean, z_log_var, z
 
 
 class VAE_Encoder(tf.keras.Model):
@@ -176,19 +166,22 @@ class VAE_Encoder(tf.keras.Model):
         self.seq_len = seq_len
         self.features = features
         self.latent_dim = latent_dim
-        self.encoder = self.build_BiLSTM_encoder()
+        self.encoder = self.build_encoder()
 
-    def build_BiLSTM_encoder(self):
+    def build_encoder(self):
         # Input
-        enc_input = Input(shape=(self.seq_len, self.features))
+        enc_input = tfkl.Input(shape=(self.seq_len, self.features))
         # Add small ammount of Gaussian noise
-        enc_input = GaussianNoise(0.01)(enc_input)
-        # Pass input through BiLSTM layers
-        bilstm = Bidirectional(LSTM(512, return_sequences=True))(enc_input)
-        bilstm = Bidirectional(LSTM(256, return_sequences=True))(bilstm)
+        enc_input = tfkl.GaussianNoise(0.8)(enc_input)
+        #  BiLSTM layer
+        bilstm = tfkl.Bidirectional(tfkl.LSTM(128, return_sequences=True))(enc_input)
+        # L1 regularisation
+        bilstm = tfkl.ActivityRegularization(l1=1e-7)(bilstm)
+        # Take last hidden state
+        last_states = bilstm[:, -1, :]
         # Transform deterministic BiLSTM output into distribution parameters z_mean and z_log_var
-        z_mean = TimeDistributed(Dense(self.latent_dim, name="z_mean"))(bilstm)
-        z_log_var = TimeDistributed(Dense(self.latent_dim, name="z_log_var"))(bilstm)
+        z_mean = tfkl.Dense(self.latent_dim, name="z_mean")(last_states)
+        z_log_var = tfkl.Dense(self.latent_dim, name="z_log_var")(last_states)
         # Create distribution object for reparametrisation trick
         output_dist = tfp.distributions.Normal(loc=0., scale=1.)
         # Get epsilon for reparametrisation trick
@@ -208,55 +201,31 @@ class VAE_Decoder(tf.keras.Model):
         self.seq_len = seq_len
         self.features = features
         self.latent_dim = latent_dim
-        self.decoder = self.build_BiLSTM_decoder()
+        self.decoder = self.build_decoder()
 
-    def build_BiLSTM_decoder(self):
+    def build_decoder(self):
         # Latent vector input
-        attention_input = Input(shape=(self.seq_len, self.latent_dim))
-        # Pass input through BiLSTM layers
-        bilstm = Bidirectional(LSTM(256, return_sequences=True))(attention_input)
-        bilstm = Bidirectional(LSTM(512, return_sequences=True))(bilstm)
-        # Transform deterministic BiLSTM output into distribution parameters Xhat_mean and Xhat_log_var
-        Xhat_mean = TimeDistributed(Dense(self.features), name="Xhat_mean")(bilstm)
-        Xhat_log_var = TimeDistributed(Dense(self.features), name="Xhat_log_var")(bilstm)
+        latent_input = tfkl.Input(shape=(self.latent_dim,))
+        # Repeat latent vector as many times as the window length
+        latent_rep = tfkl.RepeatVector(self.seq_len)(latent_input)
+        # BiLSTM layer
+        bilstm = tfkl.Bidirectional(tfkl.LSTM(128, return_sequences=True))(latent_rep)
+        # L1 regularisation
+        bilstm = tf.keras.layers.ActivityRegularization(l1=1e-7)(bilstm)
+        # Transform deterministic BiLSTM output into distribution parameters z_mean and z_log_var
+        Xhat_mean = tfkl.TimeDistributed(tfkl.Dense(self.features), name="Xhat_mean")(bilstm)
+        Xhat_log_var = tfkl.TimeDistributed(tfkl.Dense(self.features), name="Xhat_log_var")(bilstm)
         # Create distribution object for reparametrisation trick
         output_dist = tfp.distributions.Normal(loc=0., scale=1.)
         # Get epsilon for reparametrisation trick
         eps = output_dist.sample(tf.shape(Xhat_mean))
         # Reparametrisation trick
         Xhat = Xhat_mean + tf.sqrt(tf.math.exp(Xhat_log_var)) * eps
-        return tf.keras.Model(attention_input, [Xhat_mean, Xhat_log_var, Xhat], name="decoder")
+        return tf.keras.Model(latent_input, [Xhat_mean, Xhat_log_var, Xhat], name="decoder")
 
     @tf.function
     def call(self, inputs, **kwargs):
         return self.decoder(inputs, **kwargs)
-
-
-class MA(tf.keras.Model):
-    def __init__(self, seq_len, latent_dim, features):
-        super(MA, self).__init__()
-
-        self.seq_len = seq_len
-        self.features = features
-        self.latent_dim = latent_dim
-        self.ma = self.build_MA()
-
-    def build_MA(self):
-        attention = MultiHeadAttention(
-            num_heads=8,
-            key_dim=64,
-            output_shape=self.latent_dim,
-            name="A_det"
-        )
-
-        ma_input = Input(shape=(self.seq_len, self.features))
-        latent_input = Input(shape=(self.seq_len, self.latent_dim))
-        A = attention(ma_input, ma_input, latent_input)
-        return tf.keras.Model([ma_input, latent_input], A, name="MA")
-
-    @tf.function
-    def call(self, inputs, **kwargs):
-        return self.ma(inputs, **kwargs)
 
 
 # Establish callbacks
@@ -269,21 +238,12 @@ es = tf.keras.callbacks.EarlyStopping(monitor='val_log_probs_loss',
 
 annealing = VAE_kl_annealing(
     annealing_epochs=25,
-    type="cyclical",
+    type="monotonic",
     grace_period=25,
     start=1e-8,
     end=1e-2,
     lower_initial_betas=False,
 )
-
-seq_len = 256
-latent_dim = 64
-features = 13
-
-encoder = VAE_Encoder(seq_len=seq_len, latent_dim=latent_dim, features=features)
-decoder = VAE_Decoder(seq_len=seq_len, latent_dim=latent_dim, features=features)
-ma = MA(seq_len=seq_len, latent_dim=latent_dim, features=features)
-
 
 tf_train = tf.data.Dataset.load('LOAD_PATH')
 tf_val = tf.data.Dataset.load('LOAD_PATH')
@@ -291,17 +251,18 @@ tf_val = tf.data.Dataset.load('LOAD_PATH')
 tf_train = tf_train.unbatch().batch(512)
 tf_val = tf_val.unbatch().batch(512)
 
-vae = MA_VAE(encoder, decoder, ma, beta=1e-8)
-optimiser = tf.keras.optimizers.Adam(amsgrad=True)
-vae.compile(optimizer=optimiser)
+encoder = VAE_Encoder(seq_len=256, latent_dim=5, features=13)
+decoder = VAE_Decoder(seq_len=256, latent_dim=5, features=13)
+model = W_VAE(encoder, decoder, beta=1e-8)
+optimiser = tf.keras.optimizers.Adam(amsgrad=True, clipnorm=5)
+model.compile(optimizer=optimiser)
 
 # Fit vae model
-history = vae.fit(tf_train,
-                  epochs=10000,
-                  callbacks=[es,
-                             annealing,
-                             ],
-                  validation_data=tf_val,
-                  verbose=1
-                  )
-
+history = model.fit(tf_train,
+                    epochs=10000,
+                    callbacks=[es,
+                               annealing,
+                               ],
+                    validation_data=tf_val,
+                    verbose=1
+                    )

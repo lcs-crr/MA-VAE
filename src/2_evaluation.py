@@ -64,7 +64,7 @@ def rev_window(windows, shift, mode):
     return data
 
 
-def evaluate_vmsa_vae(model, data, rev_mode, window_size):
+def evaluate_vae(model, data, rev_mode, window_size):
     # Window data
     shift = 1
     test_data = window(data, window_size, shift)
@@ -101,7 +101,7 @@ window_size = 256
 val_score = []
 for sequence in validation_data:
     # Inference on validation data
-    score, recon = evaluate_vmsa_vae(model, sequence, rev_mode, window_size)
+    score, recon = evaluate_vae(model, sequence, rev_mode, window_size)
     # Reduce windows to scalars through percentile
     val_score.append(np.percentile(score, 100))
 val_score = np.vstack(val_score)
@@ -112,7 +112,7 @@ threshold = np.percentile(val_score, 100)
 normal_test_score = []
 for sequence in normal_test_data:
     # Inference on sequence
-    score, recon = evaluate_vmsa_vae(model, sequence, rev_mode, window_size)
+    score, recon = evaluate_vae(model, sequence, rev_mode, window_size)
     score = np.percentile(score, 100)
     # Find maximum error in anomaly score sequence
     normal_test_score.append(score)
@@ -123,7 +123,7 @@ predicted_labels_normal = normal_test_score >= threshold
 anomalous_test_score = []
 for sequence in anomalous_test_data:
     # Inference on sequence
-    score, recon = evaluate_vmsa_vae(model, sequence, rev_mode, window_size)
+    score, recon = evaluate_vae(model, sequence, rev_mode, window_size)
     # Find maximum error in anomaly score sequence
     score = np.percentile(score, 100)
     anomalous_test_score.append(score)

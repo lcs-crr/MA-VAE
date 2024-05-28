@@ -249,7 +249,7 @@ class MA(tf.keras.Model):
 
         ma_input = tfkl.Input(shape=(self.seq_len, self.features))
         latent_input = tfkl.Input(shape=(self.seq_len, self.latent_dim))
-        A = attention(ma_input, ma_input, latent_input)
+        A = attention(query=ma_input, key=ma_input, value=latent_input)
         return tf.keras.Model([ma_input, latent_input], A, name="MA")
 
     @tf.function
